@@ -1,48 +1,171 @@
 #!/usr/bin/perl  -w
-##
-# Copyright (c) 2015-2016 Advanced Micro Devices, Inc. All rights reserved.
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-#
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
-##
-#usage hipify [OPTIONS] INPUT_FILE
-use Getopt::Long;
 
-my $warn_whitelist ="";
-GetOptions(
-      "print-stats" => \$print_stats                   # print the command-line, like a header.
-    , "count-conversions" => \$count_conversions       # count conversions.
-    , "quiet-warnings" => \$quiet_warnings           # don't print warnings on unknown CUDA functions.
-    , "warn-whitelist=s"=> \$warn_whitelist
-    , "no-translate-builtins" => \$no_translate_builtins      # don't translate math functions.
-    , "no-translate-textures" => \$no_translate_textures
-    , "no-output" => \$no_output                      # don't write any translated output to stdout.
-    , "inplace" => \$inplace                          # modify input file inplace, replacing input with hipified output, save backup in ".prehip" file.
-														# If .prehip file exists, use that as input to hip.
-    , "n" => \$n                                      # combination of print_stats + no-output.
+use vars '$VERSION'; $VERSION = '0.1';
+
+=head1 NAME
+
+ hipify
+
+=head1 SYNOPSIS
+
+ ./hipify [OPTIONS] [ARGUMENTS]
+
+ Scan and convert CUDA source code to HIP
+
+=head1 DESCRIPTION
+
+ HIP allows developers to convert CUDA code to portable C++. Key features include:
+
+   * HIP is a lightweight tool and has little or no performance impact over programming directly in CUDA or hcc "HC" mode.
+   * HIP allows coding in a single-source C++ programming language including features such as templates, C++11 lambdas, classes, namespaces and more.
+   * HIP allows developers to use the "best" development environment and tools on each target platform.
+   * The "hipify" tool automatically converts source code from CUDA to HIP.
+   * Developers can specialize for the platform (CUDA or hcc) to tune for performance
+
+ New projects can be developed directly in the portable HIP C++ language and can run on either NVIDIA or AMD platforms.
+ Additionally, HIP provides porting tools which make it easy to port existing CUDA codes to the HIP layer, with no loss of performance 
+ as compared to the original CUDA application. HIP is not intended to be a drop-in replacement for CUDA, and developers should expect 
+ to do some manual coding and performance tuning work to complete the port.
+ 
+=head1 OPTIONS
+
+ --help                   print help page
+ --man                    print man page
+ --version                print version
+ --directory              search directory
+ --print-stats            print the command-line, like a header.
+ --count-conversions      count the number of conversions
+ --quiet-warnings         omit writing warnings on unknown CUDA functions
+ --warn-whitelist         a comma-separated list of strings
+ --no-translate-builtins  don't translate math functions
+ --no-translate-textures
+ --no-output              don't write any translated output to stdout
+ --inplace                do in place source code conversions
+ -n                       --print-stats --no-output
+
+=head1 COPYRIGHT
+
+ Copyright (c) 2015-2016 Advanced Micro Devices, Inc. All rights reserved.
+
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
+
+=cut
+
+# import Perl modules
+use Getopt::Long;
+use Pod::Usage;
+
+# parse command line
+my $cl_help                  = 0;
+my $cl_man                   = 0;
+my $cl_directory             = ".";
+my $cl_print_stats           = 0;
+my $cl_count_conversions     = 0;
+my $cl_quiet_warnings        = 0;
+my $cl_warn_whitelist        = "";
+my $cl_no_translate_builtins = 0;
+my $cl_no_translate_textures = 0;
+my $cl_no_output             = 0;
+my $cl_inplace               = 0;
+my $cl_n                     = 0;
+
+my %cl_options = (
+      "help|h"                => \$cl_help
+    , "man"                   => \$cl_man
+    , "directory=s"           => \$cl_directory
+    , "print-stats"           => \$cl_print_stats
+    , "count-conversions"     => \$cl_count_conversions
+    , "quiet-warnings"        => \$cl_quiet_warnings
+    , "warn-whitelist=s"      => \$cl_warn_whitelist
+    , "no-translate-builtins" => \$cl_no_translate_builtins
+    , "no-translate-textures" => \$cl_no_translate_textures
+    , "no-output"             => \$cl_no_output
+    , "inplace"               => \$cl_inplace
+    , "n"                     => \$cl_n
 );
 
-$print_stats = 1 if $n;
-$no_output   = 1 if $n;
+GetOptions( %cl_options ) or die "Command line parsing error, exiting.";
+
+# update dependencies between options
+$cl_print_stats = 1 if $n;
+$cl_no_output   = 1 if $n;
+
+# provide help and man functions
+pod2usage( -exitval => 0, -verbose => 1) if $cl_help == 1;
+pod2usage( -exitval => 0, -verbose => 2) if $cl_man  == 1;
+
+###########################################
+# FUNCTIONS
+###########################################
+
+sub Iterator (&) {
+	return $_[0];
+}
+
+sub getNextValue { 
+	$_[0]->();
+}
+
+sub hasSourceCodeExtension {
+	my ( $file, @extensions ) = @_;
+	
+	if ( $file =~ /.*\.(h|c|hpp|cpp|cc|cu|cuh)$/i ) {
+		return 1;
+	}
+	return;	
+}
+
+sub getFileIterator {
+	my ( $codeReference, @queue ) = @_;
+	
+	return Iterator {
+		QUEUE: while ( @queue ) {
+			
+			# check if next element in queue is a file that passes the code reference
+			my $file = shift( @queue );
+			if ( ! -d "$file" ) {
+				if ( ! $codeReference->( $file ) ) {
+					next( QUEUE );
+				}
+				return $file;
+			}
+		
+			# this is a new directory inside the current directory
+			my $currentDirectory = $file;
+			
+			# open the new directory and push all entries onto the queue
+			my $directoryHandle;
+			if ( ! opendir( $directoryHandle, $currentDirectory ) ) {
+				next( QUEUE );
+			}
+			
+			my @newFiles = grep { $_ ne "." && $_ ne ".." } readdir( $directoryHandle );
+			@newFiles = map( "$currentDirectory/$_", @newFiles );
+			push( @queue, @newFiles );
+		}
+		return;
+	};	
+}
 
 # These uses of cuda[A-Z] are commonly used in CUDA code but don't actually map to any CUDA API:
 # TODO - use a hash lookup for these.
-@warn_whitelist = (
+my @warn_whitelist = (
          "cudaError"
         ,"cudaStatus"
         ,"cudaDevice"
@@ -79,7 +202,7 @@ $no_output   = 1 if $n;
 
 
 # Allow users to add their own functions.
-push (@warn_whitelist, split(',',$warn_whitelist));
+push (@warn_whitelist, split(',', $cl_warn_whitelist));
 
 
 #---
@@ -139,16 +262,92 @@ sub addStats
 #---
 sub clearStats
 {
+
     my $dest_ref  =  shift() ;
     my @statNames = @{ shift() };
-
+    
     foreach $stat (@statNames) {
         $dest_ref->{$stat}  = 0;
     }
 }
 
+sub countSupportedSpecialFunctions
+{
+    my $m = 0;
 
+    #supported special functions:
+    foreach $func (
+        # Synchronization:
+        "__syncthreads",
+    )
+    {
+        # match math at the beginning of a word, but not if it already has a namespace qualifier ('::') :
+        $m += m/[:]?[:]?\b($func)\b(\w*\()/g;
 
+    }
+
+    return $m;
+}
+
+sub warnUnsupportedSpecialFunctions {
+    my ( $fileName, $line_num ) =  @_;
+
+    my $m = 0;
+    
+    foreach $func (
+        # memory fence:
+        "__threadfence_block",
+        "__threadfence",
+        "__threadfence_system",
+
+        # Synchronization:
+        "__syncthreads_count",
+        "__syncthreads_and",
+        "__syncthreads_or",
+
+        # Read-only cache function:
+        "__ldg",
+
+        # Cross-lane and warp-vote instructions:
+        #"__all",
+        #"__any",
+        #"__ballot",
+
+        #"__popc",
+        #"__clz",
+
+        #"__shfl",
+        #"__shfl_up",
+        #"__shfl_down",
+        #"__shfl_xor",
+
+        "__prof_trigger",
+
+        # too popular, and we can't tell if we are in device or host code.
+        #"assert",
+        #"printf",
+
+        #"malloc",
+        #"free",
+        #"memset",
+        #"memcpy"
+    )
+    {
+        # match math at the beginning of a word, but not if it already has a namespace qualifier ('::') :
+        my $mt = m/[:]?[:]?\b($func)\b(\w*\()/g;
+        if  ($mt) {
+            $m += $mt;
+            print STDERR "  warning: $fileName:#$line_num : unsupported device function : $_\n";
+        }
+
+    }
+
+    return $m;
+}
+
+###########################################
+# MAIN
+###########################################
 
 # count of transforms in all files:
 my %tt;
@@ -161,14 +360,24 @@ $TlineCount = 0;
 my %TwarningTags ;
 my %Tkernels ;
 
-my $fileCount = @ARGV;
-my $fileName = "";
+my $fileCount = 0;
 
-while (@ARGV) {
-    $fileName=shift (@ARGV);
+# get list of source code files below search directory
+my $it = getFileIterator( \&hasSourceCodeExtension, $cl_directory );
+if ( ref( $it ) ne "CODE" ) {
+	printf STDERR "Failed to generate file iterator.\n";
+	exit(1);
+}
 
+# iterator over list of files below search directory
+FILE: while ( my $fileName = getNextValue($it) ) {
+	if ( ! -e "$fileName" || ! -r "$fileName" ) {
+		printf STDERR "file = '$fileName' doesn't exist or is not readable.\n";
+		next(FILE)
+	}
+	$fileCount++;
 
-    if ($inplace) {
+    if ($cl_inplace) {
         my $file_prehip = "$fileName" . ".prehip";
 		my $infile;
 		my $outfile;
@@ -189,10 +398,6 @@ while (@ARGV) {
         open(INFILE,"<", $fileName) or die "error: could not open $fileName";
         $OUTFILE = STDOUT;
     }
-
-
-
-
 
     # Note : \b is used in perl to indicate the start of a word - typically that is what we want in this case:
     #
@@ -506,7 +711,7 @@ while (@ARGV) {
 
 
 
-        unless ($no_translate_textures) {
+        unless ($cl_no_translate_textures) {
             $ft{'tex'} += s/\bcudaChannelFormatDesc\b/hipChannelFormatDesc/g;
             $ft{'tex'} += s/\bcudaFilterModePoint\b/hipFilterModePoint/g;
             $ft{'tex'} += s/\bcudaReadModeElementType\b/hipReadModeElementType/g;
@@ -519,7 +724,7 @@ while (@ARGV) {
         }
 
 
-        if ($count_conversions) {
+        if ($cl_count_conversions) {
             while (/(\bhip[A-Z]\w+\b)/g) {
                 $convertedTags{$1}++;
 
@@ -534,7 +739,7 @@ while (@ARGV) {
 
 
 
-        unless ($quiet_warnings) {
+        unless ($cl_quiet_warnings) {
             #print STDERR "Check WARNINGs\n";
             # copy into array of lines, process line-by-line to show warnings:
             if ($hasDeviceCode or (/\bcuda/) or (/<<<.*>>>/) or (/(\bcublas[A-Z]\w+)/) or (/(\bcurand[A-Z]\w+)/) ) {
@@ -570,7 +775,7 @@ while (@ARGV) {
                         print STDERR "\n";
                     }
 
-                    $s = warnUnsupportedSpecialFunctions($line_num);
+                    $s = warnUnsupportedSpecialFunctions( $fileName, $line_num );
                     $warnings += $s;
 
 
@@ -586,7 +791,7 @@ while (@ARGV) {
         #--------
         # Math libraries
         # To limit bogus translations, try to make sure we are in a kernel (ft{'builtin'} != 0):
-        if (not $no_translate_builtins and ($hasDeviceCode > 0)) {
+        if (not $cl_no_translate_builtins and ($hasDeviceCode > 0)) {
             $ft{'special_func'} += countSupportedSpecialFunctions();
         }
 
@@ -596,7 +801,7 @@ while (@ARGV) {
         #--------
         # Print it!
         # TODO - would like to move this code outside loop but it uses $_ which contains the whole file.
-        unless ($no_output) {
+        unless ($cl_no_output) {
             my $apiCalls   = $ft{'err'} + $ft{'event'} + $ft{'mem'} + $ft{'stream'} + $ft{'dev'} + $ft{'def'} +  $ft{'tex'} +  $ft{'other'} + $ft{'math_func'};
             my $kernStuff  = $hasDeviceCode + $ft{'kern'};
             my $totalCalls = $apiCalls + $kernStuff;
@@ -621,7 +826,7 @@ while (@ARGV) {
     #printf "TOTAL-CONV=%d\n", $totalConverted;
 
 
-    if (($totalConverted+$warnings) and $print_stats) {
+    if (($totalConverted+$warnings) and $cl_print_stats) {
         printStats("info: converted", \@statNames, \%ft, $warnings, $lineCount);
         print STDERR " in '$fileName'\n";
     }
@@ -637,7 +842,7 @@ while (@ARGV) {
 }
 
 #-- Print total stats for all files processed:
-if ($print_stats and ($fileCount > 1)) {
+if ($cl_print_stats and ($fileCount > 1)) {
     print STDERR "\n";
     printStats("info: TOTAL-converted", \@statNames, \%tt, $Twarnings, $TlineCount);
     print STDERR "\n";
@@ -657,88 +862,8 @@ if ($print_stats and ($fileCount > 1)) {
     print STDERR "\n";
 }
 
-if ($count_conversions) {
+if ($cl_count_conversions) {
     foreach my $key (sort { $convertedTags{$b} <=> $convertedTags{$a} } keys %convertedTags) {
         printf STDERR "  %s %d\n", $key, $convertedTags{$key};
     }
-}
-
-
-
-
-sub countSupportedSpecialFunctions
-{
-    my $m = 0;
-
-    #supported special functions:
-    foreach $func (
-        # Synchronization:
-        "__syncthreads",
-    )
-    {
-        # match math at the beginning of a word, but not if it already has a namespace qualifier ('::') :
-        $m += m/[:]?[:]?\b($func)\b(\w*\()/g;
-
-    }
-
-    return $m;
-}
-
-sub warnUnsupportedSpecialFunctions
-{
-    my $line_num =  shift;
-
-    my $m = 0;
-
-
-
-    foreach $func (
-        # memory fence:
-        "__threadfence_block",
-        "__threadfence",
-        "__threadfence_system",
-
-        # Synchronization:
-        "__syncthreads_count",
-        "__syncthreads_and",
-        "__syncthreads_or",
-
-        # Read-only cache function:
-        "__ldg",
-
-        # Cross-lane and warp-vote instructions:
-        #"__all",
-        #"__any",
-        #"__ballot",
-
-        #"__popc",
-        #"__clz",
-
-        #"__shfl",
-        #"__shfl_up",
-        #"__shfl_down",
-        #"__shfl_xor",
-
-        "__prof_trigger",
-
-        # too popular, and we can't tell if we are in device or host code.
-        #"assert",
-        #"printf",
-
-        #"malloc",
-        #"free",
-        #"memset",
-        #"memcpy"
-    )
-    {
-        # match math at the beginning of a word, but not if it already has a namespace qualifier ('::') :
-        my $mt = m/[:]?[:]?\b($func)\b(\w*\()/g;
-        if  ($mt) {
-            $m += $mt;
-            print STDERR "  warning: $fileName:#$line_num : unsupported device function : $_\n";
-        }
-
-    }
-
-    return $m;
 }

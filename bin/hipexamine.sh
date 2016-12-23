@@ -9,4 +9,4 @@
 SCRIPT_DIR=`dirname $0`
 SEARCH_DIR=$1
 shift
-$SCRIPT_DIR/hipify -no-output -print-stats "$@" `$SCRIPT_DIR/findcode.sh $SEARCH_DIR`
+$SCRIPT_DIR/hipify -no-output -print-stats "$@" --directory $SEARCH_DIR
