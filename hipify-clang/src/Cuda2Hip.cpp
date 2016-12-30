@@ -46,7 +46,10 @@ THE SOFTWARE.
 
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <set>
+
+#include <sys/stat.h>
 
 using namespace clang;
 using namespace clang::ast_matchers;
@@ -1362,7 +1365,7 @@ class Cuda2HipCallback;
 class HipifyPPCallbacks : public PPCallbacks, public SourceFileCallbacks {
 public:
   HipifyPPCallbacks(Replacements *R)
-      : SeenEnd(false), _sm(nullptr), _pp(nullptr), Replace(R) {}
+      : SeenEnd(false), _sm(nullptr), _pp(nullptr), Match(nullptr), Replace(R) {}
 
   virtual bool handleBeginSource(CompilerInstance &CI,
                                  StringRef Filename) override {
@@ -1604,9 +1607,7 @@ private:
         if (const UnresolvedLookupExpr *ule =
           dyn_cast<UnresolvedLookupExpr>(e)) {
           calleeName = ule->getName().getAsIdentifierInfo()->getName();
-          owner->addMatcher(functionTemplateDecl(hasName(calleeName))
-            .bind("unresolvedTemplateName"),
-            this);
+          owner->addMatcher(functionTemplateDecl(hasName(calleeName)).bind("unresolvedTemplateName"), this);
         }
       }
       XStr.clear();
@@ -2004,6 +2005,16 @@ static cl::opt<bool> Inplace("inplace",
        cl::value_desc("inplace"),
        cl::cat(ToolTemplateCategory));
 
+static cl::opt<bool> StoreToBackup("backup",
+       cl::desc("Create a backup of all source files and exit."),
+       cl::value_desc("backup"),
+       cl::cat(ToolTemplateCategory));
+
+static cl::opt<bool> RestoreFromBackup("restore",
+       cl::desc("Restore original source files from backup"),
+       cl::value_desc("restore"),
+       cl::cat(ToolTemplateCategory));
+
 static cl::opt<bool> NoBackup("no-backup",
        cl::desc("Don't create a backup file for the hipified source"),
        cl::value_desc("no-backup"),
@@ -2104,49 +2115,214 @@ void printStats(std::string fileSource, HipifyPPCallbacks &PPCallbacks, Cuda2Hip
   llvm::outs() << ") in \'" << fileSource << "\'\n";
 }
 
-int main(int argc, const char **argv) {
-  llvm::sys::PrintStackTraceOnErrorSignal();
-  CommonOptionsParser OptionsParser(argc, argv, ToolTemplateCategory, llvm::cl::Required);
-  std::vector<std::string> fileSources = OptionsParser.getSourcePathList();
-  std::string dst = OutputFilename;
-  if (N) {
-    NoOutput = PrintStats = true;
+/*! \brief check for conflicts between command line options and resolve dependencies
+ *
+ *  \return (bool) true if not conflicts, false otherwise
+ */
+bool passCommandLineOptions( CommonOptionsParser &parser ) {
+  // resolve -n option dependencies
+	if ( N ) { NoOutput   = true; }
+	if ( N ) { PrintStats = true; }
+
+	if ( NoOutput && Inplace ) {
+	  llvm::errs() << "Check command line options: -no-output and -inplace cannot be combined.\n";
+	  return false;
+	}
+
+	if ( NoOutput && ! OutputFilename.empty() ) {
+	  llvm::errs() << "Check command line options: -no-output and -o cannot be combined.\n";
+	  return false;
+	}
+
+	if ( ! OutputFilename.empty() && parser.getSourcePathList().size() > 1 ) {
+    llvm::errs() << "Check command line options: -o can only be used with a single source file.\n";
+    return false;
+	}
+	return true;
+}
+
+/*! \brief get and verify source files specified on command line
+ *
+ *  \return (vector<string>) a vector of strings containing the source files
+ */
+std::vector<std::string> getSourceFiles( CommonOptionsParser &parser ) {
+  std::vector<std::string> sourceFiles = parser.getSourcePathList();
+
+  struct stat fileStats;
+
+  for( auto sourceFile : sourceFiles ) {
+    if ( stat( sourceFile.c_str(), &fileStats ) != 0 ) {
+      llvm::errs() << "Check command line options: the file '" << sourceFile << "' doesn't exist.\n";
+      exit(1);
+    }
+    if ( ! ( fileStats.st_mode & S_IRUSR ) ) {
+      llvm::errs() << "Check command line options: the file '" << sourceFile << "' is not readable.\n";
+      exit(1);
+    }
+    if ( Inplace && ! ( fileStats.st_mode & S_IWUSR ) ) {
+      llvm::errs() << "Check command line options: the file '" << sourceFile << "' is not writable and -inplace was specified.\n";
+      exit(1);
+    }
   }
-  if (NoOutput) {
-    if (Inplace) {
-      llvm::errs() << "Conflict: both -no-output and -inplace options are specified.\n";
-      return 1;
-    }
-    if (!dst.empty()) {
-      llvm::errs() << "Conflict: both -no-output and -o options are specified.\n";
-      return 1;
-    }
+  return sourceFiles;
+}
+
+
+std::string getOutputFilename( const std::string &inputFilename, const std::string &defaultFilename ) {
+	std::string outputFilename;
+
+	if ( ! defaultFilename.empty() ) {
+		outputFilename = defaultFilename + ".hip";
+		return outputFilename;
+	}
+
+	outputFilename = inputFilename;
+	if ( ! Inplace ) {
+		size_t pos = outputFilename.rfind(".");
+		if (pos != std::string::npos && pos+1 < outputFilename.size()) {
+			outputFilename = outputFilename.substr(0, pos) + ".hip." + outputFilename.substr(pos+1, outputFilename.size()-pos-1);
+		} else {
+			outputFilename += ".hip.cu";
+		}
+	}
+	return outputFilename;
+}
+
+/*! \brief Use the list of source files (input) to generate a list of target files (output)
+ *
+ *  \param  (vector<string>) vector of source files
+ *  \param  (string)         default target file name when input list has only one element
+ *  \return (vector<string>) vector of target files
+ */
+std::vector<std::string> getTargetFiles( const std::vector<std::string> &sourceFiles, const std::string &defaultFilename ) {
+  std::vector<std::string> targetFiles;
+  targetFiles.resize( sourceFiles.size() );
+
+  auto sourceIt = sourceFiles.cbegin();
+  auto targetIt = targetFiles.begin();
+  while( sourceIt != sourceFiles.end() && targetIt != targetFiles.end() ) {
+    *targetIt = getOutputFilename( *sourceIt, defaultFilename );
+    ++sourceIt;
+    ++targetIt;
   }
-  if (dst.empty()) {
-    dst = fileSources[0];
-    if (!Inplace) {
-      size_t pos = dst.rfind(".");
-      if (pos != std::string::npos && pos+1 < dst.size()) {
-        dst = dst.substr(0, pos) + ".hip." + dst.substr(pos+1, dst.size()-pos-1);
-      } else {
-        dst += ".hip.cu";
-      }
+  return targetFiles;
+}
+
+/*! \brief Backup list of source files.
+ *
+ *  \param  (vector<string>) vector of source files
+ *  \return (size_t)         the number of files not backed-up
+ */
+size_t backupSourceFiles( const std::vector<std::string> &sourceFiles ) {
+
+  size_t backupCount = 0;
+  for ( auto sourceFile : sourceFiles ) {
+    std::string backupFile = sourceFile + ".prehip";
+
+    std::ifstream source( sourceFile, std::ios::binary);
+    if ( ! source.good() ) {
+      llvm::errs() << "Failed to open file '" << sourceFile << "' for reading during backup.\n";
+      exit(1);
     }
-  } else {
-    if (Inplace) {
-      llvm::errs() << "Conflict: both -o and -inplace options are specified.\n";
-      return 1;
+
+    std::ofstream dest( backupFile, std::ios::binary);
+    if ( ! dest.good() ) {
+      llvm::errs() << "Failed to open file '" << backupFile << "' for writing during backup.\n";
+      exit(1);
     }
-    dst += ".hip";
-  }
-  // backup source file since tooling may change "inplace"
-  if (!NoBackup || !Inplace) {
-    std::ifstream source(fileSources[0], std::ios::binary);
-    std::ofstream dest(Inplace ? dst + ".prehip" : dst, std::ios::binary);
+
     dest << source.rdbuf();
     source.close();
     dest.close();
+    llvm::outs() << "Backup '" << sourceFile << "' to '" << backupFile << "'.\n";
+    ++backupCount;
   }
+  llvm::outs() << "Backup of " << backupCount << " files completed.\n";
+  return sourceFiles.size() - backupCount;
+}
+
+/*! \brief Restore list of source files.
+ *
+ *  \param  (vector<string>) vector of source files
+ *  \return (size_t)         the number of files not restored
+ */
+size_t restoreSourceFiles( const std::vector<std::string> &sourceFiles ) {
+
+  struct stat fileStats;
+
+  size_t restoreCount = 0;
+  for ( auto sourceFile : sourceFiles ) {
+    std::string backupFile = sourceFile + ".prehip";
+
+    if ( stat( backupFile.c_str(), &fileStats ) != 0 ) {
+      llvm::errs() << "the backup file '" << backupFile << "' doesn't exist.\n";
+      continue;
+    }
+    if ( ! ( fileStats.st_mode & S_IRUSR ) ) {
+      llvm::errs() << "the backup file '" << backupFile << "' is not readable.\n";
+      continue;
+    }
+
+    std::ifstream source( backupFile, std::ios::binary);
+    if ( ! source.good() ) {
+      llvm::errs() << "Failed to open file '" << backupFile << "' for reading during backup.\n";
+      continue;
+    }
+
+    std::ofstream dest( sourceFile, std::ios::binary);
+    if ( ! dest.good() ) {
+      llvm::errs() << "Failed to open file '" << sourceFile << "' for writing during backup.\n";
+      continue;
+    }
+
+    dest << source.rdbuf();
+    source.close();
+    dest.close();
+    llvm::outs() << "Restore '" << sourceFile << "' using '" << backupFile << "'.\n";
+    ++restoreCount;
+  }
+  llvm::outs() << "Restore " << restoreCount << " files.\n";
+  return sourceFiles.size() - restoreCount;
+}
+
+
+int main(int argc, const char **argv) {
+
+  llvm::sys::PrintStackTraceOnErrorSignal();
+
+  // process command line options
+  CommonOptionsParser OptionsParser(argc, argv, ToolTemplateCategory, llvm::cl::Required);
+  if ( ! passCommandLineOptions( OptionsParser ) ) {
+	  exit(1);
+  }
+
+  // get source files from command line and verify access
+  std::vector<std::string> fileSources = getSourceFiles( OptionsParser );
+
+  // map source files to target files
+  std::vector<std::string> fileTargets = getTargetFiles( fileSources, OutputFilename );
+
+  // restore source files from backup and exit
+  if ( RestoreFromBackup ) {
+    uint numFilesNotRestored = restoreSourceFiles( fileSources );
+    exit( numFilesNotRestored );
+  }
+
+  // backup sources file and exit
+  if ( StoreToBackup ) {
+    uint numFilesNotBackedup = backupSourceFiles( fileSources );
+    exit( numFilesNotBackedup );
+  }
+
+  // backup source file since tooling may change "inplace"
+  if ( ! NoBackup ) {
+    uint numFilesNotBackedup = backupSourceFiles( fileSources );
+    if ( numFilesNotBackedup > 0 ) {
+      exit( numFilesNotBackedup );
+    }
+  }
+
+  std::string dst = getOutputFilename( fileSources[0], OutputFilename );
 
   RefactoringTool Tool(OptionsParser.getCompilations(), dst);
   ast_matchers::MatchFinder Finder;

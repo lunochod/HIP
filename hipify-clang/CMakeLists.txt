@@ -4,7 +4,7 @@ project(hipify-clang)
 set(BUILD_HIPIFY_CLANG 0 PARENT_SCOPE)
 
 # Find LLVM package
-find_package(LLVM 3.8 QUIET PATHS ${HIPIFY_CLANG_LLVM_DIR} NO_DEFAULT_PATH)
+find_package(LLVM 3.8 PATHS ${HIPIFY_CLANG_LLVM_DIR} NO_DEFAULT_PATH)
 if (NOT ${LLVM_FOUND})
     message(STATUS "hipify-clang will not be built. To build it please specify absolute path to LLVM (v3.8) package using -DHIPIFY_CLANG_LLVM_DIR")
 else()
